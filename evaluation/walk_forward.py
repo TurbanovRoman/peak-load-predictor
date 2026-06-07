@@ -83,6 +83,7 @@ def run_walk_forward(
     # достаточно для самого длинного лага (168 ч = 10080 мин).
     _FEAT_WINDOW = 12000
     history_records: list = history_seed.reset_index(drop=True).to_dict("records")
+    raw_history_records: list = history_seed.reset_index(drop=True).to_dict("records")  # сырые y_true для cleaner.fit()
 
     def _history_df() -> pd.DataFrame:
         return pd.DataFrame(history_records[-_FEAT_WINDOW:])
@@ -108,6 +109,7 @@ def run_walk_forward(
 
         if np.isnan(y_pred):
             history_records.append({"ds": current_ts, "y": y_stored})
+            raw_history_records.append({"ds": current_ts, "y": y_true})
             continue
 
         mae_step = abs(y_true - y_pred)
@@ -123,9 +125,9 @@ def run_walk_forward(
             if cleaner is not None and hasattr(cleaner, "seasonal_") \
                     and cleaner.seasonal_ is not None:
                 season_len = len(cleaner.seasonal_)
-                n_hist = len(history_records)
+                n_hist = len(raw_history_records)
                 if n_hist >= 2 * season_len:
-                    cleaner.fit(pd.DataFrame(history_records[-max(2 * season_len, n_hist):]))
+                    cleaner.fit(pd.DataFrame(raw_history_records[-max(2 * season_len, n_hist):]))
                     if verbose:
                         print(f"  [cleaner.fit] сезонная составляющая обновлена "
                               f"(history={n_hist}, season_len={season_len})")
@@ -152,6 +154,7 @@ def run_walk_forward(
         })
 
         history_records.append({"ds": current_ts, "y": y_stored})
+        raw_history_records.append({"ds": current_ts, "y": y_true})
 
         if verbose and i % 50 == 0:
             print(f"  шаг {i}/{len(test)}, MAE адапт.={mae_step:.2f}, "
