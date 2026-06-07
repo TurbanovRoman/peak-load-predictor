@@ -396,9 +396,10 @@ class PeakDetector:
 
             # Остаток ≈ отклонение от скользящей медианы (приближение r_t)
             residual = float(cur) - float(rolling_med[i])
+            in_event = bool(campaign_arr[i]) if campaign_arr is not None and i < len(campaign_arr) else False
             is_anom = (
                 self._if_detector.is_anomaly(residual)
-                if self._if_detector is not None else False
+                if self._if_detector is not None and not in_event else False
             )
 
             event = self.detect(

@@ -156,6 +156,27 @@ def run_walk_forward(
         history_records.append({"ds": current_ts, "y": y_stored})
         raw_history_records.append({"ds": current_ts, "y": y_true})
 
+        # Периодическое обновление Tukey-порогов по сырым данным.
+        # Без этого clip_one обрезает новый режим (~6500) до уровня старых порогов (~4688),
+        # и модель при первом ретрейне обучается на уже срезанных значениях.
+        if cleaner is not None and (i + 1) % cleaner.stl_period == 0:
+            _n_raw = len(raw_history_records)
+            if _n_raw >= 4 * cleaner.stl_period:
+                _prev_up = cleaner.thresh_tukey_up_ or 0.0
+                _raw_upd = pd.DataFrame(raw_history_records)
+                cleaner.fit(_raw_upd)
+                try:
+                    _clean_upd, _ = cleaner.transform(_raw_upd)
+                    _lu = {pd.Timestamp(r["ds"]): r["y"]
+                           for r in _clean_upd.to_dict("records")}
+                    for _r in history_records:
+                        _r["y"] = _lu.get(pd.Timestamp(_r["ds"]), _r["y"])
+                except Exception:
+                    pass
+                if verbose and cleaner.thresh_tukey_up_ - _prev_up > 50:
+                    print(f"  [cleaner] шаг {i+1}: Tukey↑ "
+                          f"{_prev_up:.0f} → {cleaner.thresh_tukey_up_:.0f}")
+
         if verbose and i % 50 == 0:
             print(f"  шаг {i}/{len(test)}, MAE адапт.={mae_step:.2f}, "
                   f"MAE baseline={mae_baseline:.2f}")
