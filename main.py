@@ -15,7 +15,7 @@
   python main.py demo
   python main.py train --synthetic
 """
-g
+
 import argparse
 import os
 import sys
@@ -30,6 +30,7 @@ warnings.filterwarnings("ignore")
 
 import config
 from preprocessing.feature_engineering import FeatureBuilder, split_train_val_test
+from preprocessing.data_cleaning import TimeSeriesCleaner
 from models.xgboost_model import (
     train_xgboost, predict_xgboost,
     get_confidence_interval, feature_importance,
@@ -74,11 +75,36 @@ def load_data(use_synthetic: bool = False, days: int = None) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# Предобработка: обучение TimeSeriesCleaner на тренировочной части и очистка
+# ---------------------------------------------------------------------------
+
+def _apply_cleaner(df: pd.DataFrame, n_test: int, n_val: int, save_dir: str) -> pd.DataFrame:
+    """
+    Обучает TimeSeriesCleaner на обучающей части и применяет ко всему датасету.
+
+    Тренировочная часть: df.iloc[:-(n_test + n_val)].
+    Сохраняет cleaner.pkl в save_dir для последующей загрузки в инференсе.
+    Возвращает очищенный DataFrame с колонками ds, y, is_holiday, is_halo.
+    """
+    n = len(df)
+    n_train_end = max(n - n_test - n_val, n // 2)
+    cleaner = TimeSeriesCleaner()
+    cleaner.fit(df.iloc[:n_train_end])
+    cleaned_df, stats = cleaner.transform(df)
+    os.makedirs(save_dir, exist_ok=True)
+    cleaner.save(save_dir)
+    print(f"Предобработка: удалено шума={stats['n_outliers_removed']}, "
+          f"легитимных пиков сохранено={stats['n_peaks_preserved']}")
+    return cleaned_df
+
+
+# ---------------------------------------------------------------------------
 # Режим: обучение одной модели (XGBoost) + оценка
 # ---------------------------------------------------------------------------
 
 def mode_train(args):
     df = load_data(use_synthetic=args.synthetic)
+    df = _apply_cleaner(df, config.SPLIT_TEST_HOURS, config.SPLIT_VAL_HOURS, config.MODEL_SAVE_DIR)
     train, val, test = split_train_val_test(
         df,
         test_hours=config.SPLIT_TEST_HOURS,
@@ -164,6 +190,7 @@ def mode_train(args):
 
 def mode_compare(args):
     df = load_data(use_synthetic=args.synthetic)
+    df = _apply_cleaner(df, config.SPLIT_TEST_HOURS, config.SPLIT_VAL_HOURS, config.MODEL_SAVE_DIR)
     train, val, test = split_train_val_test(
         df,
         test_hours=config.SPLIT_TEST_HOURS,
@@ -214,6 +241,12 @@ def mode_simulate(args):
     )
 
     use_synthetic = args.synthetic
+    # Загружаем сохранённый cleaner (обучен при mode_train/compare/csv)
+    cleaner_path = os.path.join(config.MODEL_SAVE_DIR, "cleaner.pkl")
+    sim_cleaner = TimeSeriesCleaner.load(config.MODEL_SAVE_DIR) if os.path.exists(cleaner_path) else None
+    if sim_cleaner is None:
+        print("Предупреждение: cleaner.pkl не найден — запустите сначала mode_train/compare/csv")
+
     print("Запуск симуляции проактивного масштабирования (Ctrl+C для остановки)...")
     iteration = 0
 
@@ -225,6 +258,10 @@ def mode_simulate(args):
                 print("Недостаточно данных, ожидание...")
                 time.sleep(60)
                 continue
+
+            # Предобработка: применяем сохранённый cleaner к свежим данным
+            if sim_cleaner is not None:
+                df, _ = sim_cleaner.transform(df)
 
             # Инициализируем детектор по последним 24ч
             history = df.iloc[:-1]["y"]
@@ -287,6 +324,7 @@ def mode_demo(args):
     print(f"\nДанные: {len(df)} точек, "
           f"RPS min={df['y'].min():.0f} max={df['y'].max():.0f}\n")
 
+    df = _apply_cleaner(df, config.SPLIT_TEST_HOURS, config.SPLIT_VAL_HOURS, config.MODEL_SAVE_DIR)
     train, val, test = split_train_val_test(
         df,
         test_hours=config.SPLIT_TEST_HOURS,
@@ -424,6 +462,7 @@ def mode_csv(args) -> None:
     TEST_H  = min(480, n // 6)   # ~20% но не более 480ч (20 дней)
     VAL_H   = TEST_H
 
+    df = _apply_cleaner(df, TEST_H, VAL_H, config.MODEL_SAVE_DIR)
     train, val, test = split_train_val_test(df, test_hours=TEST_H, val_hours=VAL_H)
     print(f"Split: train={len(train)}ч  val={len(val)}ч  test={len(test)}ч\n")
 

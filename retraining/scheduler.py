@@ -144,9 +144,22 @@ class RetrainScheduler:
         pred = self.predict_fn(self.model, X)
         return float(np.asarray(pred).flatten()[0])
 
-    def observe(self, ts: pd.Timestamp, y_true: float, y_pred: float) -> None:
-        """Добавляет наблюдение в буфер O(1) и обновляет drift detector."""
-        self._history_deque.append({"ds": pd.Timestamp(ts), "y": float(y_true)})
+    def observe(
+        self,
+        ts: pd.Timestamp,
+        y_true: float,
+        y_pred: float,
+        y_clean: Optional[float] = None,
+    ) -> None:
+        """
+        Добавляет наблюдение в буфер O(1) и обновляет drift detector.
+
+        y_clean : очищенное Тьюки значение (если доступно) — сохраняется в истории
+                  для консистентности с обучающими данными.
+                  Drift-детектор всегда получает сырой y_true.
+        """
+        y_stored = float(y_clean) if y_clean is not None else float(y_true)
+        self._history_deque.append({"ds": pd.Timestamp(ts), "y": y_stored})
         self.drift.observe(y_true=y_true, y_pred=y_pred)
 
     def check_and_retrain(self) -> Optional[RetrainEvent]:

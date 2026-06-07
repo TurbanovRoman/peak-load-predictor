@@ -91,6 +91,14 @@ def run_walk_forward(
         current_ts = pd.Timestamp(row["ds"])
         y_true = float(row["y"])
 
+        # Очистка точки для истории: праздники/ореол не обрезаем
+        if cleaner is not None:
+            _recent = np.array([r["y"] for r in history_records[-cleaner.stl_period:]])
+            _is_event = bool(row.get("is_holiday", 0) or row.get("is_halo", 0))
+            y_stored = cleaner.clip_one(current_ts, y_true, _is_event, _recent)
+        else:
+            y_stored = y_true
+
         hist_df = _history_df()
         y_pred = scheduler.predict_one(hist_df)
         X_last = builder.get_X(hist_df)
@@ -99,13 +107,13 @@ def run_walk_forward(
         ) if len(X_last) > 0 else float("nan")
 
         if np.isnan(y_pred):
-            history_records.append({"ds": current_ts, "y": y_true})
+            history_records.append({"ds": current_ts, "y": y_stored})
             continue
 
         mae_step = abs(y_true - y_pred)
         mae_baseline = abs(y_true - y_pred_baseline) if not np.isnan(y_pred_baseline) else np.nan
 
-        scheduler.observe(ts=current_ts, y_true=y_true, y_pred=y_pred)
+        scheduler.observe(ts=current_ts, y_true=y_true, y_pred=y_pred, y_clean=y_stored)
         event = scheduler.check_and_retrain()
         if event is not None:
             retrain_timestamps.append(current_ts)
@@ -143,7 +151,7 @@ def run_walk_forward(
             "mae_baseline": mae_baseline,
         })
 
-        history_records.append({"ds": current_ts, "y": y_true})
+        history_records.append({"ds": current_ts, "y": y_stored})
 
         if verbose and i % 50 == 0:
             print(f"  шаг {i}/{len(test)}, MAE адапт.={mae_step:.2f}, "

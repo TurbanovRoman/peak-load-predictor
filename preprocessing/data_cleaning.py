@@ -149,6 +149,7 @@ class TimeSeriesCleaner:
 
         self.seasonal_:          np.ndarray | None = None
         self.thresh_tukey_down_: float | None      = None
+        self.thresh_tukey_up_:   float | None      = None
         self.median_residual_:   float             = 0.0
         self.step_seconds_:      int               = 3600
 
@@ -185,7 +186,7 @@ class TimeSeriesCleaner:
         normal_resid = resid_series[~holiday_mask & ~halo_mask]
 
         self.median_residual_    = float(normal_resid.median())
-        self.thresh_tukey_down_, _ = _tukey_thresholds(normal_resid, self.tukey_k)
+        self.thresh_tukey_down_, self.thresh_tukey_up_ = _tukey_thresholds(normal_resid, self.tukey_k)
 
         logger.info(
             "TimeSeriesCleaner обучен: period=%d, нижний порог Тьюки=%.4f",
@@ -248,12 +249,9 @@ class TimeSeriesCleaner:
             if ecol in work.columns:
                 event_mask |= work[ecol].values.astype(bool)
 
-        # Тьюки к остатку
+        # Тьюки к остатку: пороги из fit() — не из текущих данных (нет утечки)
         is_negative_outlier = residual < self.thresh_tukey_down_
-        q1       = float(np.percentile(residual, 25))
-        q3       = float(np.percentile(residual, 75))
-        tukey_up = q3 + self.tukey_k * (q3 - q1)
-        is_positive_outlier = residual > tukey_up
+        is_positive_outlier = residual > self.thresh_tukey_up_
 
         # Классификация:
         #   провал (вниз)            → шум (сбой инфраструктуры)
@@ -308,6 +306,51 @@ class TimeSeriesCleaner:
             stats["n_outliers_removed"], stats["n_peaks_preserved"],
         )
         return out, stats
+
+    # ------------------------------------------------------------------
+    # Онлайн-очистка одной точки (инференс)
+    # ------------------------------------------------------------------
+
+    def clip_one(
+        self,
+        ts: pd.Timestamp,
+        y: float,
+        is_event: bool,
+        recent_y: np.ndarray,
+    ) -> float:
+        """
+        Очищает одну новую точку без полного STL.
+
+        Использует каузальный тренд (среднее stl_period последних точек истории)
+        и сохранённый сезонный профиль. Применяет пороги Тьюки из fit().
+
+        Параметры
+        ----------
+        ts        : метка времени новой точки
+        y         : сырое значение
+        is_event  : True если точка в окне праздника/ореола (не обрезать)
+        recent_y  : последние значения истории для расчёта тренда
+        """
+        if self.seasonal_ is None or self.thresh_tukey_up_ is None:
+            return float(y)
+
+        arr = np.asarray(recent_y, dtype=float)
+        trend = float(np.nanmean(arr[-self.stl_period:])) if len(arr) >= 1 else float(y)
+
+        pos = int(
+            ((ts - pd.Timestamp("2020-01-01")).total_seconds() // self.step_seconds_)
+            % self.stl_period
+        )
+        seasonal = float(self.seasonal_[pos])
+        residual = float(y) - trend - seasonal
+
+        if not is_event:
+            if residual < self.thresh_tukey_down_:
+                residual = self.median_residual_
+            elif residual > self.thresh_tukey_up_:
+                residual = self.thresh_tukey_up_
+
+        return trend + seasonal + residual
 
     # ------------------------------------------------------------------
     # Сохранение / загрузка
