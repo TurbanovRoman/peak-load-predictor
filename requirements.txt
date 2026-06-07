@@ -1,0 +1,15 @@
+pandas
+numpy
+matplotlib
+scipy
+statsmodels
+neuralprophet
+xgboost
+pmdarima
+tensorflow
+prometheus-api-client
+locust
+scikit-learn
+joblib
+streamlit
+plotly
