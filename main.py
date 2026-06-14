@@ -377,11 +377,10 @@ def _run_peak_detection(train, val, test, preds, lower, upper,
 # Эксперимент 3: Адаптивное переобучение при концепт-дрейфе (Раздел 4.4)
 # ---------------------------------------------------------------------------
 
-def _run_drift_retraining(save_dir):
+def _run_drift_retraining(save_dir, fast=False):
     from retraining.drift_detector import ADWINDriftDetector
-    from retraining.scheduler import make_xgb_train_fn
+    from retraining.scheduler import make_multi_model_train_fn
     from evaluation.walk_forward import run_walk_forward
-    from models.forecasters import predict_xgboost_wf
 
     print("\n" + "=" * 60)
     print("ЭКСПЕРИМЕНТ 3: Адаптивное переобучение при концепт-дрейфе")
@@ -389,6 +388,20 @@ def _run_drift_retraining(save_dir):
 
     builder = FeatureBuilder()
     summary_rows = []
+
+    # На каждом переобучении make_multi_model_train_fn обучает кандидатов на свежей
+    # истории и оставляет ЛУЧШУЮ по MAE — т.е. модель для адаптивного прогноза
+    # выбирается динамически, как и в сравнении (Эксп. 1).
+    #
+    # NeuralProphet (AR) тоже участвует: run_walk_forward синхронизирует его контекст
+    # с недавней реальной историей (_sync_ar_context) → прогноз на 1 шаг от конца,
+    # как в проде, без O(n²). Гиперпараметры заданы разумными значениями, чтобы не
+    # запускать отдельный поиск на каждом ретрейне.
+    xgb_params = dict(max_depth=6, learning_rate=0.05, subsample=0.8,
+                      colsample_bytree=0.8, min_child_weight=3,
+                      reg_alpha=0.1, reg_lambda=1.0)
+    prophet_params = None if fast else dict(
+        n_changepoints=20, trend_reg=0.1, seasonality_reg=0.1, n_lags=24, ar_reg=0.1)
 
     scenarios = [
         (0,  "Дрейф ДО тестового периода (модель устарела до теста)"),
@@ -409,23 +422,27 @@ def _run_drift_retraining(save_dir):
                                                 test_hours=TEST_H, val_hours=VAL_H)
         print(f"    Train={len(train)}, Val={len(val)}, Test={len(test)}")
 
-        # Фиксированная модель: обучена на train-части, не обновляется
-        (X_tr, y_tr), (X_vl, y_vl), (X_te, y_te) = builder.transform_splits(train, val, test)
-        fixed_model = train_xgboost(X_tr, y_tr, X_vl, y_vl)
-        fixed_preds = predict_xgboost(fixed_model, X_te)
-        fixed_mae   = float(np.mean(np.abs(y_te.values - fixed_preds)))
-        print(f"    MAE фиксированной модели: {fixed_mae:.1f}")
-
-        # Адаптивная модель: walk-forward + ADWIN + переобучение
-        drift_det = ADWINDriftDetector()
-        train_fn  = make_xgb_train_fn(builder, val_fraction=0.15, save_dir=save_dir)
-        wf_save   = os.path.join(save_dir, f"e3_drift{days_drift}d")
+        wf_save = os.path.join(save_dir, f"e3_drift{days_drift}d")
         os.makedirs(wf_save, exist_ok=True)
 
+        # train_fn переобучает XGBoost / LSTM / NeuralProphet и выбирает лучшую по MAE
+        train_fn = make_multi_model_train_fn(
+            builder, val_fraction=0.15, save_dir=wf_save,
+            include_lstm=not fast, include_prophet=not fast,
+            xgb_params=xgb_params, prophet_best_params=prophet_params,
+        )
+
+        # Начальная (фиксированная) модель = лучшая на train+val.
+        # run_walk_forward ведёт её без обновления как baseline, а адаптивную —
+        # с переобучением через тот же train_fn.
+        init_seed = pd.concat([train, val]).sort_values("ds").reset_index(drop=True)
+        initial_model, predict_fn, _ = train_fn(init_seed)
+
+        drift_det = ADWINDriftDetector()
         result = run_walk_forward(
             train=train, val=val, test=test,
-            initial_model=fixed_model,
-            predict_fn=predict_xgboost_wf,
+            initial_model=initial_model,
+            predict_fn=predict_fn,
             train_fn=train_fn,
             builder=builder,
             drift_detector=drift_det,
@@ -433,14 +450,13 @@ def _run_drift_retraining(save_dir):
             verbose=False,
         )
         s = result["summary"]
-        print(f"    MAE адаптивной:  {s['mae_adaptive']:.1f}  "
-              f"(улучшение {s['improvement_pct']:.1f}%,  "
-              f"переобучений: {s['n_retrains']})")
+        print(f"    MAE фикс.={s['mae_baseline']:.1f} | адапт.={s['mae_adaptive']:.1f}  "
+              f"(улучшение {s['improvement_pct']:.1f}%,  переобучений: {s['n_retrains']})")
 
         summary_rows.append({
             "label": label,
             "days_drift": days_drift,
-            "mae_fixed":    round(fixed_mae, 1),
+            "mae_fixed":    round(s["mae_baseline"], 1),
             "mae_adaptive": round(s["mae_adaptive"], 1),
             "improvement_pct": round(s["improvement_pct"], 1),
             "n_retrains": s["n_retrains"],
@@ -448,7 +464,8 @@ def _run_drift_retraining(save_dir):
 
     pd.DataFrame(summary_rows).to_csv(
         os.path.join(save_dir, "e3_drift_summary.csv"), index=False)
-    print(f"\nСохранено в {save_dir}/e3_*")
+    print(f"\nСохранено в {save_dir}/e3_*  "
+          f"(графики дрейфа: e3_drift*/walk_forward_forecast.png)")
 
 
 # ---------------------------------------------------------------------------
@@ -549,7 +566,7 @@ def mode_demo(args):
     _run_peak_detection(train, val, test, preds, lower, upper, comparator, save_dir)
 
     # Эксперимент 3: адаптивное переобучение
-    _run_drift_retraining(save_dir)
+    _run_drift_retraining(save_dir, fast=args.fast)
 
     # Эксперимент 4: праздники
     _run_holiday_forecast(save_dir, fast=args.fast)

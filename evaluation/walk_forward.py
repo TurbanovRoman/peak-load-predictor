@@ -15,6 +15,26 @@ import numpy as np
 import pandas as pd
 
 
+def _sync_ar_context(model, hist_df, context: int = 400) -> None:
+    """
+    Синхронизирует контекст AR-модели (NeuralProphet) с недавней РЕАЛЬНОЙ историей.
+
+    Без этого predict_prophet_wf прогнозирует от замороженного конца обучения до
+    текущей точки (periods растёт с каждым шагом) → O(n²) на длинном тесте.
+    Подменяя _train_df последними `context` наблюдениями, получаем прогноз ровно
+    на 1 шаг от конца — так же, как AR-модель работает в проде (читает последние
+    n_lags реальных значений за O(1)). Веса модели не трогаем, только контекст.
+    Для не-AR моделей (XGBoost, LSTM) — no-op (нет атрибута _train_df).
+    """
+    if not hasattr(model, "_train_df") or hist_df is None or len(hist_df) == 0:
+        return
+    if "ds" not in hist_df.columns or "y" not in hist_df.columns:
+        return
+    cols = ["ds", "y"] + [c for c in getattr(model, "_exog_cols", [])
+                          if c in hist_df.columns]
+    model._train_df = hist_df[cols].tail(context).reset_index(drop=True)
+
+
 def run_walk_forward(
     train: pd.DataFrame,
     val: pd.DataFrame,
@@ -101,6 +121,10 @@ def run_walk_forward(
             y_stored = y_true
 
         hist_df = _history_df()
+        # AR-модели (NeuralProphet) прогнозируют от недавней реальной истории
+        # (1 шаг от конца, как в проде) — иначе predict_prophet_wf даёт O(n²).
+        _sync_ar_context(scheduler.model, hist_df)
+        _sync_ar_context(initial_model, hist_df)
         y_pred = scheduler.predict_one(hist_df)
         X_last = builder.get_X(hist_df)
         y_pred_baseline = float(
@@ -211,6 +235,7 @@ def run_walk_forward(
         print(f"  Переобучений:     {summary['n_retrains']}")
 
     plot_walk_forward(results_df, baseline_df, retrain_timestamps, save_dir)
+    plot_walk_forward_forecast(results_df, baseline_df, retrain_timestamps, save_dir)
 
     return {
         "results_df":  results_df,
@@ -252,6 +277,63 @@ def plot_walk_forward(
     plt.tight_layout()
 
     path = os.path.join(save_dir, "walk_forward_mae.png")
+    plt.savefig(path, dpi=150)
+    plt.close()
+    return path
+
+
+def plot_walk_forward_forecast(
+    results_df: pd.DataFrame,
+    baseline_df: pd.DataFrame,
+    retrain_timestamps: list,
+    save_dir: str,
+) -> str:
+    """
+    Двухпанельная фигура результата адаптивного переобучения:
+      (а) прогноз RPS адаптивной и фиксированной моделей на фоне факта;
+      (б) динамика скользящей ошибки MAE.
+    Соответствует рисунку 4.14 ВКР.
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8))
+
+    # (а) прогноз vs факт
+    ax1.plot(results_df["timestamp"], results_df["y_true"],
+             color="gray", linewidth=0.8, alpha=0.8, label="Факт")
+    ax1.plot(results_df["timestamp"], results_df["y_pred"],
+             color="steelblue", linewidth=1.3, label="Адаптивная (переобучение)")
+    ax1.plot(baseline_df["timestamp"], baseline_df["y_pred_baseline"],
+             color="orange", linewidth=1.2, linestyle="--", label="Фиксированная")
+    for i, ts in enumerate(retrain_timestamps):
+        ax1.axvline(ts, color="crimson", linestyle=":", linewidth=1.0, alpha=0.8,
+                    label="Переобучение" if i == 0 else None)
+    ax1.set_ylabel("RPS")
+    ax1.legend(loc="lower center", bbox_to_anchor=(0.5, 1.02), ncol=4,
+               frameon=False, fontsize=11)
+    ax1.grid(alpha=0.3)
+
+    # (б) скользящая MAE
+    roll_a = results_df["mae"].rolling(24, min_periods=1).mean()
+    roll_b = baseline_df["mae_baseline"].rolling(24, min_periods=1).mean()
+    ax2.plot(results_df["timestamp"], roll_a, color="steelblue",
+             linewidth=1.3, label="MAE адаптивная")
+    ax2.plot(baseline_df["timestamp"], roll_b, color="orange",
+             linewidth=1.2, linestyle="--", label="MAE фиксированная")
+    for ts in retrain_timestamps:
+        ax2.axvline(ts, color="crimson", linestyle=":", linewidth=1.0, alpha=0.7)
+    ax2.set_xlabel("Время")
+    ax2.set_ylabel("MAE (скольз. 24 шага)")
+    ax2.legend(loc="upper right", frameon=False, fontsize=11)
+    ax2.grid(alpha=0.3)
+
+    for ax in (ax1, ax2):
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d"))
+    plt.setp(ax2.get_xticklabels(), rotation=20)
+    plt.tight_layout()
+
+    path = os.path.join(save_dir, "walk_forward_forecast.png")
     plt.savefig(path, dpi=150)
     plt.close()
     return path
