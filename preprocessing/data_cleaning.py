@@ -89,12 +89,16 @@ def _impute(work: pd.DataFrame, value_col: str, stl_period: int, gap_alpha: floa
 
     if long_gap_mask.any():
         work_feats = pd.DataFrame(index=work.index)
-        work_feats["_hour"]      = work_feats.index.hour
-        work_feats["_dow"]       = work_feats.index.dayofweek
-        work_feats["is_holiday"] = work["is_holiday"]
-        work_feats["_lag1"]      = work[value_col].shift(1).fillna(work[value_col].median())
+        work_feats["_hour"] = work_feats.index.hour
+        work_feats["_dow"]  = work_feats.index.dayofweek
+        # Событийный контекст: восстановление дыр с учётом праздников/ореола/кампаний
+        event_feats = [c for c in ("is_holiday", "is_halo", "is_campaign", "is_promo")
+                       if c in work.columns]
+        for c in event_feats:
+            work_feats[c] = work[c].fillna(0)
+        work_feats["_lag1"] = work[value_col].shift(1).fillna(work[value_col].median())
 
-        features    = ["_hour", "_dow", "is_holiday", "_lag1"]
+        features    = ["_hour", "_dow", *event_feats, "_lag1"]
         known_mask  = ~work[value_col].isna()
         if known_mask.any():
             rf = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
@@ -209,10 +213,10 @@ class TimeSeriesCleaner:
             raise RuntimeError("Вызовите fit() перед transform()")
 
         work, _ = _parse_and_grid(df, ts_col, value_col, min_step_seconds=self.step_seconds_)
-        work = _impute(work, value_col, self.stl_period, self.gap_alpha)
 
-        # Перенести все событийные колонки из df в work до фильтра Тьюки.
-        # Берём только те, что явно объявлены в EXOG_COLS — не хватаем is_weekend и т.п.
+        # Событийные колонки из df подвязываем ДО импутации, чтобы RF восстанавливал
+        # длинные пропуски с учётом праздников/ореола/кампаний (без утечки — они
+        # известны заранее по календарю). Берём только объявленные в EXOG_COLS.
         try:
             import config as _cfg
             event_cols = [c for c in getattr(_cfg, "EXOG_COLS", []) if c in df.columns]
@@ -226,6 +230,8 @@ class TimeSeriesCleaner:
                 .astype(int)
                 .values
             )
+
+        work = _impute(work, value_col, self.stl_period, self.gap_alpha)
 
         series = work[value_col].values
 

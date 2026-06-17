@@ -263,6 +263,70 @@ def _run_model_comparison(save_dir, fast=False):
 # Эксперимент 2: Детекция пиков + аномалии (Раздел 4.3)
 # ---------------------------------------------------------------------------
 
+def _plot_peak_detection(events_df, save_path, ci_lower=None, ci_upper=None,
+                         event_mask=None, min_rep=None, max_rep=None):
+    """Двухпанельный график детекции пиков: прогноз+порог+уровни сверху, реплики снизу."""
+    import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
+
+    df = events_df.copy()
+    ts = pd.to_datetime(df["timestamp"]).to_numpy()
+    min_rep = config.MIN_REPLICAS if min_rep is None else min_rep
+    max_rep = config.MAX_REPLICAS if max_rep is None else max_rep
+
+    fig, (ax1, ax2) = plt.subplots(
+        2, 1, figsize=(14, 7), sharex=True,
+        gridspec_kw={"height_ratios": [3, 1]},
+    )
+
+    # контекстные события (праздники/ореол)
+    if event_mask is not None:
+        em = np.asarray(event_mask, dtype=bool)
+        ax1.fill_between(ts, float(df["rps"].min()), float(df["rps"].max()),
+                         where=em, color="red", alpha=0.07, label="Контекстное событие")
+
+    ax1.plot(ts, df["rps"],       color="gray",  lw=0.9, alpha=0.8, label="Факт")
+    ax1.plot(ts, df["predicted"], color="green", lw=1.4,            label="Прогноз")
+    ax1.plot(ts, df["threshold"], color="red",   lw=1.2, ls="--",   label="Адаптивный порог")
+
+    # доверительный интервал Q90 (если передан)
+    if ci_lower is not None and ci_upper is not None:
+        ax1.fill_between(ts, np.asarray(ci_lower)[:len(ts)], np.asarray(ci_upper)[:len(ts)],
+                         color="green", alpha=0.12, label="Q90 интервал")
+
+    # уровни серьёзности
+    for sev, col in {"warning": "gold", "critical": "darkorange", "exceeded": "red"}.items():
+        m = (df["severity"].values == sev)
+        if m.any():
+            ax1.scatter(ts[m], df["predicted"].values[m], s=18, color=col, zorder=5, label=sev)
+
+    # аномалии → выделяем треугольником, в этот момент реплик = max
+    if "is_anomaly" in df.columns and df["is_anomaly"].any():
+        m = df["is_anomaly"].values.astype(bool)
+        ax1.scatter(ts[m], df["rps"].values[m], s=70, marker="^",
+                    color="purple", zorder=6, label="аномалия")
+
+    ax1.set_ylabel("RPS")
+    ax1.legend(loc="lower center", bbox_to_anchor=(0.5, 1.02), ncol=4, frameon=False, fontsize=10)
+    ax1.grid(alpha=0.3)
+
+    # нижняя панель — рекомендованное число реплик
+    ax2.plot(ts, df["recommended_replicas"], color="steelblue", lw=1.3,
+             drawstyle="steps-post", label="Рекомендовано реплик")
+    ax2.axhline(min_rep, color="green", ls=":", lw=1.0, label=f"min={min_rep}")
+    ax2.axhline(max_rep, color="red",   ls=":", lw=1.0, label=f"max={max_rep}")
+    ax2.set_ylabel("Реплики"); ax2.set_xlabel("Время")
+    ax2.legend(loc="upper right", frameon=False, fontsize=9, ncol=3)
+    ax2.grid(alpha=0.3)
+
+    ax2.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d"))
+    plt.setp(ax2.get_xticklabels(), rotation=20)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    return save_path
+
+
 def _run_peak_detection(train, val, test, preds, lower, upper,
                         comparator, save_dir):
     from data_collection.synthetic_data import generate_synthetic_traffic
@@ -329,6 +393,13 @@ def _run_peak_detection(train, val, test, preds, lower, upper,
                   f"[{row['severity']}]  реплик={row['recommended_replicas']}{mark}")
 
     events_df.to_csv(os.path.join(save_dir, "e2_peak_events.csv"), index=False)
+    _plot_peak_detection(
+        events_df,
+        save_path=os.path.join(save_dir, "e2_peak_detection.png"),
+        ci_lower=lower[:len(events_df)],
+        ci_upper=upper[:len(events_df)],
+        event_mask=(campaign_mask.values if campaign_mask is not None else None),
+    )
 
     # --- Часть Б: 60-дневный ряд с инъецированными аномалиями ---
     print("\n  [IF] Синтетический ряд с инъецированными аномалиями (60 дней)...")
@@ -370,6 +441,11 @@ def _run_peak_detection(train, val, test, preds, lower, upper,
           f"пиков порогом: {n_peaks}, "
           f"реплик max: {int(ev_a['recommended_replicas'].max())}")
     ev_a.to_csv(os.path.join(save_dir, "e2_anomaly_events.csv"), index=False)
+    _plot_peak_detection(
+        ev_a,
+        save_path=os.path.join(save_dir, "e2_anomaly_detection.png"),
+        event_mask=(cam_a.values if cam_a is not None else None),
+    )
     print(f"\nСохранено в {save_dir}/e2_*")
 
 

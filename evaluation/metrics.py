@@ -4,7 +4,7 @@
 Базовые (глава 1.3.2 ВКР):
   MAE   = (1/n) * Σ|y_i - ŷ_i|
   RMSE  = √((1/n) * Σ(y_i - ŷ_i)²)
-  MAPE  = (1/n) * Σ|y_i - ŷ_i| / |y_i| * 100%       (формула 1.3)
+  sMAPE = (100/n) * Σ|y_i - ŷ_i| / ((|y_i|+|ŷ_i|)/2)  (формула 1.3, симметричная)
 
 Расширенный набор (добавлены после аудита, см. AUDIT_REPORT.md, шаг 8):
   SMAPE = (200/n) * Σ |y - ŷ| / (|y| + |ŷ|)         — устойчивый аналог MAPE
@@ -31,15 +31,16 @@ import matplotlib.pyplot as plt
 
 def safe_mape(y_true: np.ndarray, y_pred: np.ndarray, eps: float = 1e-6) -> float:
     """
-    MAPE, устойчивая к нулям.
-    Точки, где |y_true| < eps, исключаются из расчёта.
+    sMAPE (симметричная MAPE), устойчивая к нулям (формула 1.3 ВКР).
+    Делитель — (|y| + |ŷ|)/2; точки, где он < eps, исключаются из расчёта.
     """
     y_true = np.asarray(y_true, dtype=float)
     y_pred = np.asarray(y_pred, dtype=float)
-    mask = np.abs(y_true) >= eps
+    denom = (np.abs(y_true) + np.abs(y_pred)) / 2.0
+    mask = denom >= eps
     if mask.sum() == 0:
         return float("nan")
-    return float(np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask])) * 100)
+    return float(np.mean(np.abs(y_true[mask] - y_pred[mask]) / denom[mask]) * 100)
 
 
 def evaluate(
@@ -66,11 +67,11 @@ def evaluate(
     y_true = np.asarray(y_true, dtype=float)
     y_pred = np.asarray(y_pred, dtype=float)
 
-    mae  = float(mean_absolute_error(y_true, y_pred))
-    rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
-    mape = safe_mape(y_true, y_pred)
+    mae   = float(mean_absolute_error(y_true, y_pred))
+    rmse  = float(np.sqrt(mean_squared_error(y_true, y_pred)))
+    smape = safe_mape(y_true, y_pred)
 
-    result: Dict[str, float] = {"MAE": mae, "RMSE": rmse, "MAPE": mape}
+    result: Dict[str, float] = {"MAE": mae, "RMSE": rmse, "sMAPE": smape}
 
     if y_train is not None:
         y_train = np.asarray(y_train, dtype=float)
@@ -82,7 +83,7 @@ def evaluate(
         result["MASE"] = round(mae / naive_mae, 4)
 
     if verbose:
-        print(f"  {model_name:<20} MAE={mae:8.2f}  RMSE={rmse:8.2f}  MAPE={mape:6.2f}%")
+        print(f"  {model_name:<20} MAE={mae:8.2f}  RMSE={rmse:8.2f}  sMAPE={smape:6.2f}%")
 
     return result
 
@@ -152,7 +153,7 @@ def print_comparison_table(results: Dict[str, Dict[str, float]],
     # (по умолчанию MAE), чтобы метка ★ совпадала с .best_model().
     winner = min(results, key=lambda n: results[n].get(primary_metric, float("inf")))
 
-    header = f"\n{'Модель':<22} {'MAE':>9} {'RMSE':>9} {'MAPE%':>7} {'Время,с':>9}"
+    header = f"\n{'Модель':<22} {'MAE':>9} {'RMSE':>9} {'sMAPE%':>7} {'Время,с':>9}"
     sep = "-" * 62
     print(sep)
     print(header)
@@ -163,7 +164,7 @@ def print_comparison_table(results: Dict[str, Dict[str, float]],
         t_str = f"{t:>9.2f}" if isinstance(t, (int, float)) else f"{t:>9}"
         print(
             f"  {name+mark:<24} {m['MAE']:>9.2f} {m['RMSE']:>9.2f}"
-            f" {m['MAPE']:>6.2f}%{t_str}"
+            f" {m['sMAPE']:>6.2f}%{t_str}"
         )
     print(sep)
     print(f"  [*] - best model by {primary_metric}\n")

@@ -3,24 +3,6 @@
 # Стек мониторинга: github.com/artemonsh/grafana-deploy
 # =============================================================================
 
-# --- Prometheus ---
-PROMETHEUS_URL = "http://localhost:9090"
-PROMETHEUS_ACCESS_TOKEN = ""        # Bearer-токен (если требуется)
-
-# --- PromQL-запросы для метрик бэкенда grafana-deploy ---
-# Бэкенд: Litestar, метрика: litestar_requests_total{method,path,status_code}
-# rate() даёт скорость запросов/сек; sum() агрегирует по всем меткам.
-# Окно rate должно быть ≥ step (рекомендуется step * 2..3).
-PROMETHEUS_QUERY_RPS = "sum(rate(litestar_requests_total[5m]))"
-PROMETHEUS_QUERY_LATENCY_P99 = (
-    "histogram_quantile(0.99, "
-    "sum(rate(litestar_request_duration_seconds_bucket[5m])) by (le))"
-)
-PROMETHEUS_QUERY_ACTIVE = "sum(litestar_requests_in_progress)"
-
-# Псевдоним для обратной совместимости с main.py
-PROMETHEUS_QUERY = PROMETHEUS_QUERY_RPS
-
 # Параметры выгрузки исторических данных
 # step="5min": 1 точка каждые 5 минут = 288 точек/день = 2016 за неделю
 # Prometheus scrape_interval=3s, rate-окно 5m — хорошее соответствие.
@@ -29,10 +11,6 @@ DEFAULT_DAYS_AGO = 7               # глубина истории для обу
 
 # --- Обучение ---
 MODEL_SAVE_DIR = "./saved_models"
-
-# Горизонты прогнозирования (в числе периодов при DEFAULT_STEP="5min"):
-#   15 мин = 3 периода, 30 мин = 6, 60 мин = 12
-FORECAST_HORIZONS_PERIODS = [3, 6, 12]
 
 # Разбиение данных (в периодах, при DEFAULT_STEP="5min"):
 #   24ч * 12 периодов/ч = 288 периодов
