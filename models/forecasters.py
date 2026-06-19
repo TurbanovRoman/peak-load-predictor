@@ -521,7 +521,6 @@ def refit_prophet_full(
     m._exog_cols   = exog_cols
     return m
 
-
 def predict_prophet_wf(model, X) -> np.ndarray:
     """Walk-forward обёртка: прогноз Prophet на текущий шаг через DatetimeIndex X."""
     try:
@@ -538,7 +537,6 @@ def predict_prophet_wf(model, X) -> np.ndarray:
         return np.clip(pred_df["yhat"].values[[-1]], 0, None)
     except Exception:
         return np.array([np.nan])
-
 
 def predict_prophet(
     model,
@@ -667,7 +665,6 @@ def predict_prophet(
 
     return out
 
-
 def save_prophet(model, path: str) -> None:
     """Сохраняет NeuralProphet (поддерживает разные версии API)."""
     import joblib as _joblib
@@ -683,7 +680,6 @@ def save_prophet(model, path: str) -> None:
         except (ImportError, TypeError):
             _joblib.dump(model, save_path)
 
-
 def load_prophet(path: str):
     """Загружает NeuralProphet (поддерживает разные версии API)."""
     import joblib as _joblib
@@ -697,7 +693,6 @@ def load_prophet(path: str):
             return _np_load(load_path)
         except (ImportError, TypeError):
             return _joblib.load(load_path)
-
 
 # ===========================================================================
 # Facebook Prophet (классический)
