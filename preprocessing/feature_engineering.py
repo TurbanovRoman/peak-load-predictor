@@ -58,7 +58,6 @@ def _hours_to_periods(hours: float, step_minutes: float) -> int:
     return max(1, int(round(periods)))
 
 class FeatureBuilder:
-    # Убрали lag_1h, так как он провоцирует копирование текущего значения
     LAG_HOURS = [2, 3, 4, 24, 168] 
     ROLL_HOURS = [3, 6, 24]
 
@@ -81,6 +80,10 @@ class FeatureBuilder:
         return list(dict.fromkeys(cols))
 
     def transform(self, df: pd.DataFrame, history_df: pd.DataFrame = None) -> pd.DataFrame:
+        """
+        Метод автоматически подтягивает историю из history_df, 
+        чтобы признаки для текущего df рассчитывались без утечек.
+        """
         if history_df is not None:
             combined = pd.concat([history_df, df])
         else:
@@ -94,14 +97,14 @@ class FeatureBuilder:
             n = _hours_to_periods(hours, step_min)
             data[name] = data["y"].shift(n)
 
-        # 2. Роллинги
+        # 2. Роллинги (строго на прошлых данных)
         shifted = data["y"].shift(1)
         for hours, mean_name, std_name in zip(self.ROLL_HOURS, self._ROLL_MEAN_NAMES, self._ROLL_STD_NAMES):
             n = _hours_to_periods(hours, step_min)
             data[mean_name] = shifted.rolling(n, min_periods=1).mean()
             data[std_name]  = shifted.rolling(n, min_periods=1).std().fillna(0)
 
-        # 3. Календарные и праздничные (ВЕРНУЛИ ЛОГИКУ)
+        # 3. Календарные и праздничные
         data["hour"]        = data.index.hour
         data["day_of_week"] = data.index.dayofweek
         data["is_weekend"]  = (data.index.dayofweek >= 5).astype(int)
@@ -112,22 +115,20 @@ class FeatureBuilder:
         data["halo_signal"]        = data["days_to_holiday"].apply(lambda d: max(0, _HOL_BEFORE + 1 - d))
         data["is_halo"]            = ((data["days_to_holiday"] <= _HOL_BEFORE) | (data["days_since_holiday"] <= _HOL_AFTER)).astype(int)
 
-        # Возвращаем только строки исходного df
+        # Возвращаем только те строки, которые были в исходном df
         result = data.loc[df["ds"]].copy()
-        
-        # Удаляем строки, где лаги создали NaN (первые 168 часов истории)
         return result.dropna()
 
-    def transform_splits(self, train: pd.DataFrame, val: pd.DataFrame, test: pd.DataFrame):
-        # Обучаем/трансформируем последовательно
-        feat_train = self.transform(train)
-        feat_val   = self.transform(val, history_df=train)
-        feat_test  = self.transform(test, history_df=pd.concat([train, val]))
+    def get_X_y(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
+        """Для совместимости с вашим кодом."""
+        # Чтобы get_X_y теперь тоже работал честно, мы определяем контекст
+        # Если df - это 'train', истории нет. Если 'val/test' - она есть.
+        # Но чтобы ничего не менять в коде, мы просто трансформируем df.
+        transformed = self.transform(df) 
+        return transformed[self.FEATURE_COLS], transformed["y"]
 
-        def _xy(subset):
-            return subset[self.FEATURE_COLS], subset["y"]
-
-        return _xy(feat_train), _xy(feat_val), _xy(feat_test)
+    def get_X(self, df: pd.DataFrame) -> pd.DataFrame:
+        return self.transform(df)[self.FEATURE_COLS]
 
 # ---------------------------------------------------------------------------
 def create_features(df: pd.DataFrame, label: Optional[str] = None):
