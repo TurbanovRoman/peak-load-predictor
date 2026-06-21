@@ -299,8 +299,31 @@ def predict_neural_prophet(
     else:
         yhat_col = "yhat1"
 
-    preds = forecast[yhat_col].iloc[-len(test_df):].values
-    return np.clip(np.asarray(preds, dtype=float), 0, None)
+    # Выравнивание прогноза по ds (а не по позиции).
+    # При future_regressor NeuralProphet отбрасывает последнюю строку (нет
+    # значения регрессора на t+1), а первые n_lags строк не имеют yhat (AR-
+    # контекст). Позиционный срез .iloc[-N:] из-за дропа «съезжает» и втягивает
+    # NaN-строку контекста → evaluate() падает на «Input contains NaN».
+    # Merge по timestamp устойчив к любым дропам строк.
+    fc = forecast[["ds", yhat_col]].copy()
+    fc["ds"] = pd.to_datetime(fc["ds"])
+    fc = fc.dropna(subset=[yhat_col])
+
+    test_ds = pd.to_datetime(test_df["ds"]).reset_index(drop=True)
+    merged = pd.merge_asof(
+        pd.DataFrame({"ds": test_ds}),
+        fc.sort_values("ds"),
+        on="ds",
+        direction="nearest",
+    )
+    preds = merged[yhat_col].to_numpy(dtype=float)
+
+    # Подстраховка: последняя точка может остаться без прогноза (дроп) —
+    # заполняем соседними значениями, чтобы метрики не падали на NaN.
+    if np.isnan(preds).any():
+        preds = pd.Series(preds).ffill().bfill().to_numpy(dtype=float)
+
+    return np.clip(preds, 0, None)
 
 
 # ---------------------------------------------------------------------------
