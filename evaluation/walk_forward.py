@@ -14,6 +14,32 @@ from typing import List, Optional
 import numpy as np
 import pandas as pd
 
+try:
+    import config as _cfg
+    _BUFFER_DAYS           = int(getattr(_cfg, "HISTORY_BUFFER_DAYS", 14))
+    _FEAT_DAYS             = int(getattr(_cfg, "FEAT_WINDOW_DAYS", 10))
+    MIN_HISTORY_TO_RETRAIN = int(getattr(_cfg, "MIN_HISTORY_TO_RETRAIN", 500))
+    _DEFAULT_STEP          = getattr(_cfg, "DEFAULT_STEP", "5min")
+except Exception:
+    _BUFFER_DAYS, _FEAT_DAYS, MIN_HISTORY_TO_RETRAIN, _DEFAULT_STEP = 14, 10, 500, "5min"
+
+
+def _step_to_minutes(step: str) -> int:
+    """Парсит строку шага ('5min', '1min', '60s') в минуты."""
+    step = step.strip().lower()
+    if step.endswith("min"):
+        return int(step[:-3])
+    if step.endswith("s"):
+        return max(1, int(step[:-1]) // 60)
+    return 5
+
+
+def _buffer_sizes(step: str | None = None):
+    """Возвращает (HISTORY_BUFFER_SIZE, FEAT_WINDOW) в точках для данного шага."""
+    m = _step_to_minutes(step or _DEFAULT_STEP)
+    pts_per_day = int(24 * 60 / m)
+    return _BUFFER_DAYS * pts_per_day, _FEAT_DAYS * pts_per_day
+
 
 def _sync_ar_context(model, hist_df, context: int = 400) -> None:
     """
@@ -69,6 +95,9 @@ def run_walk_forward(
     from retraining.scheduler import RetrainScheduler
     from models.forecasters import predict_xgboost
 
+    step = getattr(train, "_step", None) or _DEFAULT_STEP
+    _hist_buf_size, _feat_win = _buffer_sizes(step)
+
     audit_path = os.path.join(save_dir, "walk_forward_log.csv")
     scheduler = RetrainScheduler(
         initial_model=initial_model,
@@ -78,7 +107,8 @@ def run_walk_forward(
         drift_detector=drift_detector,
         audit_path=audit_path,
         cooldown_seconds=0.0,
-        history_buffer_size=20000,  # 20000 мин ≈ 14 суток — достаточно для 168h лага
+        history_buffer_size=_hist_buf_size,        # из config: HISTORY_BUFFER_DAYS суток в точках
+        min_history_to_retrain=MIN_HISTORY_TO_RETRAIN,
     )
 
     # Засеваем историю обучающими данными
@@ -101,7 +131,7 @@ def run_walk_forward(
     # Список вместо растущего DataFrame: O(1) append, без pd.concat на каждом шаге.
     # Для построения признаков берём только последние _FEAT_WINDOW точек —
     # достаточно для самого длинного лага (168 ч = 10080 мин).
-    _FEAT_WINDOW = 12000
+    _FEAT_WINDOW = _feat_win
     history_records: list = history_seed.reset_index(drop=True).to_dict("records")
     raw_history_records: list = history_seed.reset_index(drop=True).to_dict("records")  # сырые y_true для cleaner.fit()
 
