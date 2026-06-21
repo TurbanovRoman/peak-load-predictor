@@ -4,8 +4,8 @@
 Адаптировано для данных с гранулярностью 1 час.
 Группы признаков:
   1. Лаговые       — rps_lag_1h, rps_lag_2h, rps_lag_3h, rps_lag_24h, rps_lag_168h
-  2. Скользящие    — rps_mean/std за 3ч, 6ч, 24ч (опираются на прошлые значения)
-  3. Производные   — rps_diff (изменение за последний час), rps_momentum (ускорение)
+  2. Скользящие    — rps_mean/std за 3ч, 6ч, 24ч 
+  3. Производные   — rps_diff, rps_momentum 
   4. Календарные   — hour, day_of_week, is_weekend
   5. Праздничные   — halo_signal, days_to_holiday и т.д.
 """
@@ -15,6 +15,7 @@ import pandas as pd
 import numpy as np
 import holidays as _hol_lib
 from typing import Optional, Tuple
+import logging
 
 # ─── Праздничный календарь и параметры ореола ─────────────────────────────────
 try:
@@ -57,13 +58,9 @@ def _hours_to_periods(hours: float, step_minutes: float) -> int:
     return max(1, int(round(periods)))
 
 class FeatureBuilder:
-    """
-    Формирует вектор признаков для прогнозирования RPS.
-    """
+    """Формирует вектор признаков для прогнозирования RPS."""
     
-    # Детализированные лаги для часовых данных
     LAG_HOURS = [1, 2, 3, 24, 168]
-    # Скользящие окна (1ч убрали, так как для часовых данных это 1 точка)
     ROLL_HOURS = [3, 6, 24]
 
     _LAG_HOURS_NAMES = ["rps_lag_1h", "rps_lag_2h", "rps_lag_3h", "rps_lag_24h", "rps_lag_168h"]
@@ -78,18 +75,19 @@ class FeatureBuilder:
     ]
 
     def __init__(self, exog_cols=None):
-        # Экзогенные колонки (CPU, Memory и т.д.), которые мы пробросим без изменений
         self.exog_cols = exog_cols or []
 
     @property
     def FEATURE_COLS(self):
-        return (
+        cols = (
             self._LAG_HOURS_NAMES
             + self._ROLL_MEAN_NAMES
             + self._ROLL_STD_NAMES
             + self._EXTRA_NAMES
             + self.exog_cols
         )
+        # ЗАЩИТА №1: Удаляем возможные дубликаты признаков, сохраняя порядок
+        return list(dict.fromkeys(cols))
 
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
         data = df.copy()
@@ -104,7 +102,6 @@ class FeatureBuilder:
             data[name] = data["y"].shift(n)
 
         # --- 2. Скользящие статистики ---
-        # КРИТИЧНО: опираемся на shift(1), чтобы не было утечки таргета
         shifted = data["y"].shift(1)
         for hours, mean_name, std_name in zip(
             self.ROLL_HOURS, self._ROLL_MEAN_NAMES, self._ROLL_STD_NAMES
@@ -114,10 +111,7 @@ class FeatureBuilder:
             data[std_name]  = shifted.rolling(n, min_periods=1).std().fillna(0)
 
         # --- 3. Производные признаки ---
-        # Изменение за последний час (насколько выросли с t-2 до t-1)
         data["rps_diff"] = data["y"].diff().shift(1).fillna(0)
-        
-        # Моментум: ускоряется ли рост? Разница между лагом 1ч и лагом 2ч
         data["rps_momentum"] = (data["rps_lag_1h"] - data["rps_lag_2h"]).fillna(0)
 
         # --- 4. Календарные признаки ---
@@ -127,6 +121,9 @@ class FeatureBuilder:
 
         # --- 5. Праздничные признаки ---
         if "is_holiday" in data.columns:
+            # Используем .iloc[:, 0] на случай, если колонка is_holiday сдублировалась
+            if isinstance(data["is_holiday"], pd.DataFrame):
+                data["is_holiday"] = data["is_holiday"].iloc[:, 0]
             data["is_holiday"] = data["is_holiday"].fillna(0).astype(int)
         else:
             data["is_holiday"] = data.index.normalize().map(
@@ -141,6 +138,8 @@ class FeatureBuilder:
         )
 
         if "is_halo" in data.columns:
+            if isinstance(data["is_halo"], pd.DataFrame):
+                data["is_halo"] = data["is_halo"].iloc[:, 0]
             data["is_halo"] = data["is_halo"].fillna(0).astype(int)
         else:
             data["is_halo"] = (
@@ -149,6 +148,11 @@ class FeatureBuilder:
             ).astype(int)
 
         data = data.dropna()
+        
+        # ЗАЩИТА №2: Предупреждение, если лаги "съели" весь датасет
+        if len(data) == 0:
+            logging.warning("FeatureBuilder: После dropna() не осталось данных! Проверьте объем train/val (нужно больше истории для лага 168ч).")
+
         return data
 
     def get_X_y(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
@@ -156,6 +160,11 @@ class FeatureBuilder:
         available = [c for c in self.FEATURE_COLS if c in transformed.columns]
         X = transformed[available]
         y = transformed["y"]
+        
+        # ЗАЩИТА №3: Жестко преобразуем y в Series, если Pandas вернул DataFrame
+        if isinstance(y, pd.DataFrame):
+            y = y.iloc[:, 0]
+            
         return X, y
 
     def get_X(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -176,7 +185,11 @@ class FeatureBuilder:
         feat_train = transformed.iloc[:-(n_test + n_val)]
 
         def _xy(subset):
-            return subset[available], subset["y"]
+            y_out = subset["y"]
+            # Снова жесткая защита таргета
+            if isinstance(y_out, pd.DataFrame):
+                y_out = y_out.iloc[:, 0]
+            return subset[available], y_out
 
         return _xy(feat_train), _xy(feat_val), _xy(feat_test)
 
@@ -191,7 +204,6 @@ def create_features(df: pd.DataFrame, label: Optional[str] = None):
     return builder.get_X(df)
 
 def split_train_val_test(df: pd.DataFrame, test_hours: int = 288, val_hours: int = 288) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Разбиение на train/val/test. Параметры - в часах (т.к. шаг данных 1ч)."""
     df = df.sort_values("ds").reset_index(drop=True)
     n = len(df)
     split_test = n - test_hours
