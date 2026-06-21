@@ -81,11 +81,6 @@ class FeatureBuilder:
         return list(dict.fromkeys(cols))
 
     def transform(self, df: pd.DataFrame, history_df: pd.DataFrame = None) -> pd.DataFrame:
-        """
-        history_df: данные, предшествующие текущему df (необходимы для корректного расчета лагов/роллингов)
-        """
-        # Если есть история, объединяем только для расчета признаков, 
-        # но вернем только строки исходного df
         if history_df is not None:
             combined = pd.concat([history_df, df])
         else:
@@ -99,18 +94,29 @@ class FeatureBuilder:
             n = _hours_to_periods(hours, step_min)
             data[name] = data["y"].shift(n)
 
-        # 2. Роллинги (строго на history + current, но без будущего)
-        # Важно: берем shift(1) от 'y', чтобы не использовать текущее значение y в признаках
+        # 2. Роллинги
         shifted = data["y"].shift(1)
         for hours, mean_name, std_name in zip(self.ROLL_HOURS, self._ROLL_MEAN_NAMES, self._ROLL_STD_NAMES):
             n = _hours_to_periods(hours, step_min)
             data[mean_name] = shifted.rolling(n, min_periods=1).mean()
             data[std_name]  = shifted.rolling(n, min_periods=1).std().fillna(0)
 
-        # ... (календарные и праздничные признаки остаются прежними) ...
-        # (добавьте сюда вашу логику для is_holiday, days_to_holiday и т.д.)
+        # 3. Календарные и праздничные (ВЕРНУЛИ ЛОГИКУ)
+        data["hour"]        = data.index.hour
+        data["day_of_week"] = data.index.dayofweek
+        data["is_weekend"]  = (data.index.dayofweek >= 5).astype(int)
+        
+        data["is_holiday"]  = data.index.normalize().map(lambda d: 1 if d.date() in _RU_HOL else 0)
+        data["days_to_holiday"]    = [_days_to_next_holiday(d)   for d in data.index]
+        data["days_since_holiday"] = [_days_since_last_holiday(d) for d in data.index]
+        data["halo_signal"]        = data["days_to_holiday"].apply(lambda d: max(0, _HOL_BEFORE + 1 - d))
+        data["is_halo"]            = ((data["days_to_holiday"] <= _HOL_BEFORE) | (data["days_since_holiday"] <= _HOL_AFTER)).astype(int)
 
-        return data.loc[df["ds"]].dropna()
+        # Возвращаем только строки исходного df
+        result = data.loc[df["ds"]].copy()
+        
+        # Удаляем строки, где лаги создали NaN (первые 168 часов истории)
+        return result.dropna()
 
     def transform_splits(self, train: pd.DataFrame, val: pd.DataFrame, test: pd.DataFrame):
         # Обучаем/трансформируем последовательно
@@ -131,6 +137,7 @@ def create_features(df: pd.DataFrame, label: Optional[str] = None):
     return builder.get_X(df)
 
 def split_train_val_test(df: pd.DataFrame, test_hours: int = 288, val_hours: int = 288) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    
     df = df.sort_values("ds").reset_index(drop=True)
     n = len(df)
     split_test = n - test_hours
