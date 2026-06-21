@@ -301,13 +301,26 @@ def predict_neural_prophet(
     n_lags = getattr(model, "n_lags", 0)
     exog_cols = getattr(model, "_exog_cols", [])
 
+    # Фильтруем экзогенные колонки: оставляем только те, что реально есть в данных
+    exog_cols = [c for c in exog_cols
+                 if c in train_val_df.columns and c in test_df.columns]
+
     keep = ["ds", "y"] + exog_cols
     test_df = test_df[keep].copy()
     test_df["ds"] = pd.to_datetime(test_df["ds"])
 
+    # Защита от NaN: интерполяция y, fillna(0) для exog
+    test_df["y"] = test_df["y"].interpolate(method="linear").bfill().ffill()
+    for col in exog_cols:
+        test_df[col] = test_df[col].fillna(0)
+
     if n_lags > 0:
         context = train_val_df[keep].tail(n_lags).copy()
         context["ds"] = pd.to_datetime(context["ds"])
+        # Защита от NaN в контексте
+        context["y"] = context["y"].interpolate(method="linear").bfill().ffill()
+        for col in exog_cols:
+            context[col] = context[col].fillna(0)
         df_pred = pd.concat([context, test_df], ignore_index=True)
     else:
         df_pred = test_df.copy()
