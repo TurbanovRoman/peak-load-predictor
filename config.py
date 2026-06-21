@@ -74,6 +74,14 @@ HALO_AFTER  = 2   # дней ПОСЛЕ праздника
 # Используются в NeuralProphet как future_regressor, в XGBoost/LSTM как обычные признаки.
 EXOG_COLS = ["is_holiday", "is_halo", "is_campaign", "is_promo"]
 
+
+
+
+
+
+
+
+
 # --- Синтетические данные (для демо без Prometheus) ---
 SYNTHETIC_DAYS = 30
 SYNTHETIC_FREQ = "5min"             # шаг синтетики = шагу реального сбора

@@ -129,7 +129,20 @@ class FeatureBuilder:
 
     def get_X(self, df: pd.DataFrame) -> pd.DataFrame:
         return self.transform(df)[self.FEATURE_COLS]
+    def transform_splits(self, train: pd.DataFrame, val: pd.DataFrame, test: pd.DataFrame):
+        """
+        Метод для корректной трансформации данных без утечек.
+        Используется модулем ModelComparison.
+        """
+        feat_train = self.transform(train)
+        feat_val   = self.transform(val, history_df=train)
+        feat_test  = self.transform(test, history_df=pd.concat([train, val]))
 
+        def _xy(subset):
+            # Берем только FEATURE_COLS, чтобы избежать ошибок с лишними колонками
+            return subset[self.FEATURE_COLS], subset["y"]
+
+        return _xy(feat_train), _xy(feat_val), _xy(feat_test)
 # ---------------------------------------------------------------------------
 def create_features(df: pd.DataFrame, label: Optional[str] = None):
     builder = FeatureBuilder()
