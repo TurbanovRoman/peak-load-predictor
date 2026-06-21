@@ -356,7 +356,6 @@ def make_multi_model_train_fn(
     prophet_best_params: Optional[dict] = None,
     include_lstm: bool = True,
     include_prophet: bool = True,
-    exog_cols: Optional[List[str]] = None,
 ) -> TrainFn:
     """
     Возвращает train_fn, переобучающую XGBoost, LSTM и (опционально) Prophet
@@ -425,7 +424,6 @@ def make_multi_model_train_fn(
                 prophet_model = refit_prophet_full(
                     base_model=base,
                     train_val_df=history_df,
-                    exog_cols=exog_cols,
                 )
                 from models.forecasters import predict_prophet
                 pred_df = predict_prophet(prophet_model, periods=len(val_df),

@@ -462,7 +462,7 @@ def _run_drift_retraining(save_dir, fast=False):
     print("ЭКСПЕРИМЕНТ 3: Адаптивное переобучение при концепт-дрейфе")
     print("=" * 60)
 
-    builder = FeatureBuilder(exog_cols=config.EXOG_COLS)
+    builder = FeatureBuilder()
     summary_rows = []
 
     # На каждом переобучении make_multi_model_train_fn обучает кандидатов на свежей
