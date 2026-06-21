@@ -231,6 +231,7 @@ class ModelComparison:
                 train_df=train,
                 val_df=val,
                 save_path=save_path,
+                exog_cols=self.exog_cols,
             )
             train_val = pd.concat([train, val]).sort_values("ds")
             preds = predict_neural_prophet(

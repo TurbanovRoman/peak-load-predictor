@@ -15,6 +15,12 @@ NeuralProphet — нейросетевая декомпозиция времен
   n_forecasts=1 — one-step-ahead прогноз (согласован с XGBoost/LSTM)
   epochs     — 50 по умолчанию (достаточно для ВКР, не тормозит)
 
+Экзогенные регрессоры (future_regressors):
+  Используются признаки из EXOG_COLS = ["is_holiday", "is_halo", "is_campaign", "is_promo"].
+  Они известны заранее (по календарю / плану маркетинга) и регистрируются в модели
+  через add_future_regressor(). На этапе predict() значения exog передаются вместе
+  с тестовым периодом.
+
 Сериализация:
   NeuralProphet.save() / NeuralProphet.load() — штатный способ (.np модель)
   Не используем joblib — модель содержит PyTorch state dict, joblib не умеет.
@@ -28,7 +34,7 @@ NeuralProphet — нейросетевая декомпозиция времен
 from __future__ import annotations
 
 import os
-from typing import Optional
+from typing import List, Optional
 
 import numpy as np
 import pandas as pd
@@ -118,23 +124,31 @@ def train_neural_prophet(
     save_path: Optional[str] = None,
     verbose: bool = True,
     n_trials: int = 15,
+    exog_cols: Optional[List[str]] = None,
 ) -> object:
     """
     Обучает NeuralProphet с Bayesian-поиском гиперпараметров (Optuna).
 
     КРИТИЧНО: train_df и val_df — строго разные временные срезы.
 
+    Экзогенные регрессоры (future_regressors):
+      Если в данных присутствуют колонки из exog_cols (например,
+      ["is_holiday", "is_halo", "is_campaign", "is_promo"]), они
+      регистрируются через add_future_regressor() и используются
+      моделью как дополнительные входные признаки.
+
     Parameters
     ----------
-    train_df, val_df : DataFrame с колонками 'ds', 'y'
+    train_df, val_df : DataFrame с колонками 'ds', 'y' и опционально экзогенными
     n_lags           : окно AR-Net (None = автоматически ~24ч, макс 48)
     epochs           : максимум эпох на trial; early_stopping остановит раньше
     save_path        : путь для сохранения лучшей модели
     n_trials         : число Optuna-trials (15 ≈ random-36 по качеству)
+    exog_cols        : список экзогенных колонок, известных заранее
 
     Returns
     -------
-    Лучшая обученная модель NeuralProphet
+    Лучшая обученная модель NeuralProphet (с атрибутом _exog_cols)
     """
     try:
         from neuralprophet import NeuralProphet  # noqa: F401
@@ -149,10 +163,31 @@ def train_neural_prophet(
     if "ds" not in train_df.columns or "y" not in train_df.columns:
         raise ValueError("train_df должен содержать колонки 'ds' и 'y'")
 
-    train_df = train_df[["ds", "y"]].copy()
-    val_df   = val_df[["ds", "y"]].copy()
+    # Определяем экзогенные колонки: берём только те, что реально есть в данных
+    if exog_cols is None:
+        try:
+            import config as _cfg
+            exog_cols = getattr(_cfg, "EXOG_COLS", [])
+        except Exception:
+            exog_cols = []
+    exog_cols = [c for c in exog_cols
+                 if c in train_df.columns and c in val_df.columns]
+
+    keep = ["ds", "y"] + exog_cols
+    train_df = train_df[keep].copy()
+    val_df   = val_df[keep].copy()
     train_df["ds"] = pd.to_datetime(train_df["ds"])
     val_df["ds"]   = pd.to_datetime(val_df["ds"])
+
+    # Защита: NeuralProphet не принимает NaN в y или экзогенных колонках
+    train_df["y"] = train_df["y"].interpolate(method="linear").bfill().ffill()
+    val_df["y"]   = val_df["y"].interpolate(method="linear").bfill().ffill()
+    for col in exog_cols:
+        train_df[col] = train_df[col].fillna(0)
+        val_df[col]   = val_df[col].fillna(0)
+    # Колонки с нулевой дисперсией в train ломают NeuralProphet: StandardScaler
+    # внутри NP вычисляет (x - mean) / std, и при std=0 получает NaN.
+    exog_cols = [c for c in exog_cols if train_df[c].nunique() > 1]
 
     freq   = _infer_freq(train_df["ds"])
     yearly = _enough_for_yearly(train_df["ds"])
@@ -167,7 +202,7 @@ def train_neural_prophet(
 
     if verbose:
         print(f"  NeuralProphet: freq={freq}, n_lags={n_lags}, "
-              f"epochs={epochs}, yearly={yearly}")
+              f"epochs={epochs}, yearly={yearly}, exog={exog_cols}")
         print(f"  NeuralProphet Optuna search: {n_trials} trials")
 
     # Патч torch.load для совместимости с PyTorch 2.6
@@ -195,6 +230,10 @@ def train_neural_prophet(
                 epochs=epochs,
                 **params,
             )
+            # Регистрируем экзогенные регрессоры
+            for col in exog_cols:
+                m.add_future_regressor(col)
+
             m.fit(train_df, freq=freq, validation_df=val_df)
             pred_df = m.predict(val_full)
             col = "yhat1" if "yhat1" in pred_df.columns else "yhat"
@@ -204,6 +243,7 @@ def train_neural_prophet(
                 best_mae = mae
                 best_model = m
                 best_params_found = params
+                best_model._exog_cols = exog_cols  # сохраняем в модели
             return mae
         except Exception:
             return float("inf")
@@ -244,27 +284,29 @@ def predict_neural_prophet(
     NeuralProphet с AR-Net нуждается в n_lags предшествующих значениях y
     для каждой предсказываемой точки. Передаём контекст из конца train+val.
 
-    Это «teacher forcing» — в качестве AR-входа используются реальные
-    (а не предсказанные) значения y. Это согласовано с подходом XGBoost,
-    который тоже использует реальные лаговые значения через FeatureBuilder.
+    Если модель обучена с экзогенными регрессорами (future_regressors),
+    колонки экзогенов должны присутствовать в train_val_df и test_df
+    (они известны заранее — праздники, кампании и т.д.).
 
     Parameters
     ----------
     model        : обученная модель NeuralProphet
     train_val_df : объединённый train+val (контекст для AR-Net)
-    test_df      : тестовый датасет (ds + y — y нужны как AR-вход)
+    test_df      : тестовый датасет (ds + y + exog колонки)
 
     Returns
     -------
     np.ndarray длины len(test_df): прогноз RPS ≥ 0
     """
     n_lags = getattr(model, "n_lags", 0)
+    exog_cols = getattr(model, "_exog_cols", [])
 
-    test_df = test_df[["ds", "y"]].copy()
+    keep = ["ds", "y"] + exog_cols
+    test_df = test_df[keep].copy()
     test_df["ds"] = pd.to_datetime(test_df["ds"])
 
     if n_lags > 0:
-        context = train_val_df[["ds", "y"]].tail(n_lags).copy()
+        context = train_val_df[keep].tail(n_lags).copy()
         context["ds"] = pd.to_datetime(context["ds"])
         df_pred = pd.concat([context, test_df], ignore_index=True)
     else:
