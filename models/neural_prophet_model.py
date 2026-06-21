@@ -118,6 +118,7 @@ def train_neural_prophet(
     save_path: Optional[str] = None,
     verbose: bool = True,
     n_trials: int = 15,
+    exog_cols: Optional[list] = None,
 ) -> object:
     """
     Обучает NeuralProphet с Bayesian-поиском гиперпараметров (Optuna).
@@ -126,11 +127,12 @@ def train_neural_prophet(
 
     Parameters
     ----------
-    train_df, val_df : DataFrame с колонками 'ds', 'y'
+    train_df, val_df : DataFrame с колонками 'ds', 'y' (+ exog_cols если есть)
     n_lags           : окно AR-Net (None = автоматически ~24ч, макс 48)
     epochs           : максимум эпох на trial; early_stopping остановит раньше
     save_path        : путь для сохранения лучшей модели
     n_trials         : число Optuna-trials (15 ≈ random-36 по качеству)
+    exog_cols        : список экзогенных признаков (добавляются как future_regressor)
 
     Returns
     -------
@@ -149,8 +151,11 @@ def train_neural_prophet(
     if "ds" not in train_df.columns or "y" not in train_df.columns:
         raise ValueError("train_df должен содержать колонки 'ds' и 'y'")
 
-    train_df = train_df[["ds", "y"]].copy()
-    val_df   = val_df[["ds", "y"]].copy()
+    exog_cols = [c for c in (exog_cols or []) if c in train_df.columns]
+
+    keep_cols = ["ds", "y"] + exog_cols
+    train_df = train_df[[c for c in keep_cols if c in train_df.columns]].copy()
+    val_df   = val_df[[c for c in keep_cols if c in val_df.columns]].copy()
     train_df["ds"] = pd.to_datetime(train_df["ds"])
     val_df["ds"]   = pd.to_datetime(val_df["ds"])
 
@@ -168,6 +173,8 @@ def train_neural_prophet(
     if verbose:
         print(f"  NeuralProphet: freq={freq}, n_lags={n_lags}, "
               f"epochs={epochs}, yearly={yearly}")
+        if exog_cols:
+            print(f"  NeuralProphet future_regressors: {exog_cols}")
         print(f"  NeuralProphet Optuna search: {n_trials} trials")
 
     # Патч torch.load для совместимости с PyTorch 2.6
@@ -195,6 +202,8 @@ def train_neural_prophet(
                 epochs=epochs,
                 **params,
             )
+            for col in exog_cols:
+                m.add_future_regressor(col)
             m.fit(train_df, freq=freq, validation_df=val_df)
             pred_df = m.predict(val_full)
             col = "yhat1" if "yhat1" in pred_df.columns else "yhat"
@@ -237,6 +246,7 @@ def predict_neural_prophet(
     model,
     train_val_df: pd.DataFrame,
     test_df: pd.DataFrame,
+    exog_cols: Optional[list] = None,
 ) -> np.ndarray:
     """
     One-step-ahead прогноз на тестовом периоде.
@@ -252,19 +262,23 @@ def predict_neural_prophet(
     ----------
     model        : обученная модель NeuralProphet
     train_val_df : объединённый train+val (контекст для AR-Net)
-    test_df      : тестовый датасет (ds + y — y нужны как AR-вход)
+    test_df      : тестовый датасет (ds + y + exog_cols — y нужны как AR-вход)
+    exog_cols    : список экзогенных признаков (те же, что при обучении)
 
     Returns
     -------
     np.ndarray длины len(test_df): прогноз RPS ≥ 0
     """
     n_lags = getattr(model, "n_lags", 0)
+    exog_cols = [c for c in (exog_cols or []) if c in test_df.columns]
 
-    test_df = test_df[["ds", "y"]].copy()
+    keep_cols = ["ds", "y"] + exog_cols
+    test_df = test_df[[c for c in keep_cols if c in test_df.columns]].copy()
     test_df["ds"] = pd.to_datetime(test_df["ds"])
 
     if n_lags > 0:
-        context = train_val_df[["ds", "y"]].tail(n_lags).copy()
+        ctx_cols = ["ds", "y"] + [c for c in exog_cols if c in train_val_df.columns]
+        context = train_val_df[[c for c in ctx_cols if c in train_val_df.columns]].tail(n_lags).copy()
         context["ds"] = pd.to_datetime(context["ds"])
         df_pred = pd.concat([context, test_df], ignore_index=True)
     else:

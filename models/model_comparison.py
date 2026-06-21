@@ -231,10 +231,12 @@ class ModelComparison:
                 train_df=train,
                 val_df=val,
                 save_path=save_path,
+                exog_cols=self.exog_cols,
             )
             train_val = pd.concat([train, val]).sort_values("ds")
             preds = predict_neural_prophet(
-                model, train_val_df=train_val, test_df=test
+                model, train_val_df=train_val, test_df=test,
+                exog_cols=self.exog_cols,
             )
             preds = preds[: len(y_test)]
             elapsed = time.time() - t0
